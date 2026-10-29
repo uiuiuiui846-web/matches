@@ -1,0 +1,66 @@
+name: update
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: today | tomorrow | yesterday
+        default: today
+permissions:
+  contents: write
+concurrency:
+  group: push-data
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: fetch
+        env:
+          KEY: ${{ secrets.API_KEY }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          case "$MODE" in
+            tomorrow) OFF="+1 day";;
+            yesterday) OFF="-1 day";;
+            *) OFF="+0 day";;
+          esac
+          D=$(TZ=Africa/Cairo date -d "$OFF" +%F)
+          MIN=$(TZ=Africa/Cairo date -d "-3 day" +%F)
+          mkdir -p data
+          api(){ curl -s -D h.txt "https://v3.football.api-sports.io/$1" -H "x-apisports-key: $KEY"; }
+          api "fixtures?date=$D&timezone=Africa/Cairo" > tmp.json
+          jq -e '.response | length > 0' tmp.json >/dev/null && mv tmp.json data/$D.json
+          [ "$MODE" = "tomorrow" ] && exit 0
+          [ -f data/$D.json ] || exit 0
+          REM=$(grep -i '^x-ratelimit-requests-remaining' h.txt | tr -dc '0-9')
+          [ -z "$REM" ] && REM=50
+          [ "$REM" -gt 25 ] || exit 0
+          [ -f data/details.json ] || echo '{}' > data/details.json
+          IDS=$(jq -r --slurpfile d data/details.json '
+            [.response[]
+             | select(.league.id | IN(39,140,135,78,61,307,233,200,186,197,301,305,2,3,12,20,17,262,128,71,1,10,36,32,5,15))
+             | select(
+                ((.fixture.status.short | IN("1H","2H","HT","ET","BT","P","LIVE")))
+                or ((.fixture.status.short | IN("FT","AET","PEN"))
+                    and ((($d[0][(.fixture.id|tostring)].st) // "") != .fixture.status.short)))
+             | .fixture.id] | .[0:20] | join("-")' data/$D.json)
+          [ -n "$IDS" ] || exit 0
+          api "fixtures?ids=$IDS&timezone=Africa/Cairo" > det.json
+          jq -e '.response | length > 0' det.json >/dev/null || exit 0
+          jq -s --arg D "$D" --arg MIN "$MIN" '
+            (.[0] * ((.[1].response | map({((.fixture.id|tostring)): {
+              dt: $D,
+              st: .fixture.status.short,
+              events: [.events[]? | {t:.type,d:.detail,m:.time.elapsed,tm:.team.name,p:.player.name,a:.assist.name}],
+              stats: [.statistics[]? | {tm:.team.name, s:[.statistics[] | {k:.type,v:.value}]}]
+            }}) | add) // {}))
+            | with_entries(select((.value.dt // "9") >= $MIN))
+          ' data/details.json det.json > d2.json && mv d2.json data/details.json
+      - name: save
+        run: |
+          git config user.name bot
+          git config user.email bot@users.noreply.github.com
+          git add data
+          git commit -m "update" || exit 0
+          git pull --rebase
+          git push
