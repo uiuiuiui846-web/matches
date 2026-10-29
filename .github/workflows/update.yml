@@ -29,6 +29,7 @@ jobs:
           mkdir -p data
           api(){ curl -s -D h.txt "https://v3.football.api-sports.io/$1" -H "x-apisports-key: $KEY"; }
           api "fixtures?date=$D&timezone=Africa/Cairo" > tmp.json
+          jq -c '{results,errors}' tmp.json || head -c 300 tmp.json
           jq -e '.response | length > 0' tmp.json >/dev/null && mv tmp.json data/$D.json
           [ "$MODE" = "tomorrow" ] && exit 0
           [ -f data/$D.json ] || exit 0
